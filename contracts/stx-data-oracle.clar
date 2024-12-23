@@ -131,3 +131,108 @@
                         {total-submissions: (+ (get total-submissions device) u1)}))
                 (ok true))
             ERR-NOT-AUTHORIZED)))
+
+;; Validate data and distribute rewards
+(define-public (validate-data (device-id (string-ascii 24))
+                             (timestamp uint)
+                             (location-hash (string-ascii 16)))
+    (let ((data (unwrap! (map-get? weather-data 
+                            {device-id: device-id, timestamp: timestamp})
+                         ERR-DEVICE-NOT-FOUND))
+          (consensus (map-get? consensus-data 
+                        {location-hash: location-hash, timestamp: timestamp}))
+          (device (unwrap! (map-get? devices {device-id: device-id})
+                          ERR-DEVICE-NOT-FOUND)))
+        (if (is-some consensus)
+            (let ((consensus-unwrapped (unwrap-panic consensus)))
+                (if (and
+                    (validate-measurement 
+                        (get temperature data)
+                        (get temperature-avg consensus-unwrapped))
+                    (validate-measurement 
+                        (to-int (get humidity data))
+                        (to-int (get humidity-avg consensus-unwrapped)))
+                    (validate-measurement 
+                        (to-int (get pressure data))
+                        (to-int (get pressure-avg consensus-unwrapped)))
+                    (validate-measurement 
+                        (to-int (get wind-speed data))
+                        (to-int (get wind-speed-avg consensus-unwrapped))))
+                    (begin
+                        (try! (as-contract 
+                            (stx-transfer? reward-per-submission contract-owner 
+                                         (get owner device))))
+                        (map-set weather-data
+                            {device-id: device-id, timestamp: timestamp}
+                            (merge data {validated: true}))
+                        (ok true))
+                    ERR-CONSENSUS-FAILED))
+            ERR-INVALID-DATA)))
+
+;; Private helper functions
+(define-private (validate-measurement (value int) (consensus int))
+    (let ((deviation (abs (- value consensus))))
+        (<= (* deviation 100) (* consensus max-deviation))))
+
+(define-private (abs (value int))
+    (if (< value 0)
+        (* value -1)
+        value))
+
+;; Read-only functions
+(define-read-only (get-device-info (device-id (string-ascii 24)))
+    (map-get? devices {device-id: device-id}))
+
+(define-read-only (get-weather-data (device-id (string-ascii 24)) 
+                                   (timestamp uint))
+    (map-get? weather-data {device-id: device-id, timestamp: timestamp}))
+
+(define-read-only (get-consensus-data (location-hash (string-ascii 16)) 
+                                     (timestamp uint))
+    (map-get? consensus-data {location-hash: location-hash, timestamp: timestamp}))
+
+
+    ;; Enhanced Weather Data Oracle Contract
+
+;; Additional Constants
+(define-constant ACCURACY-THRESHOLD u80) ;; Minimum accuracy score
+(define-constant PENALTY-AMOUNT u10000000) ;; 10 STX penalty
+(define-constant MAX-INACTIVE-BLOCKS u1440) ;; Max blocks without submission
+(define-constant GOVERNANCE-THRESHOLD u75) ;; 75% for proposal passing
+
+;; Additional Error Codes
+(define-constant ERR-LOW-ACCURACY (err u407))
+(define-constant ERR-INACTIVE-DEVICE (err u408))
+(define-constant ERR-INSUFFICIENT-STAKE (err u409))
+(define-constant ERR-INVALID-PROPOSAL (err u410))
+
+;; Additional Maps
+(define-map device-metrics
+    { device-id: (string-ascii 24) }
+    {
+        last-submission-block: uint,
+        consecutive-validations: uint,
+        total-rewards: uint,
+        total-penalties: uint
+    }
+)
+
+(define-map proposals
+    { proposal-id: uint }
+    {
+        proposer: principal,
+        title: (string-ascii 50),
+        description: (string-ascii 500),
+        parameter: (string-ascii 20),
+        new-value: uint,
+        votes-for: uint,
+        votes-against: uint,
+        status: (string-ascii 10),
+        end-block: uint
+    }
+)
+
+(define-map votes-cast
+    { proposal-id: uint, voter: principal }
+    { vote: bool }
+)
